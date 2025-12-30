@@ -5,6 +5,7 @@ import "dotenv/config";
 
 import { createMongoClient } from "./lib/mongo.js";
 import { marketingRouter } from "./modules/marketing/marketing.routes.js";
+import { marketingAnalyticsRouter } from "./modules/marketing/analytics/analytics.routes.js";
 import { openapiSpec } from "./openapi.js";
 import swaggerUi from "swagger-ui-express";
 
@@ -38,6 +39,7 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 });
 
 app.use("/api/marketing", marketingRouter);
+app.use("/api/marketing/analytics", marketingAnalyticsRouter);
 
 // Basic error handler
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

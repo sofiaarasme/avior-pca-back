@@ -6,7 +6,10 @@ export const openapiSpec = {
     description: "Backend (Express + MongoDB) - módulo Marketing"
   },
   servers: [{ url: "http://localhost:3001" }],
-  tags: [{ name: "marketing", description: "Marketing module (generic CRUD)" }],
+  tags: [
+    { name: "marketing", description: "Marketing module (generic CRUD)" },
+    { name: "marketing-analytics", description: "Marketing analytics helpers (metrics + email logs)" }
+  ],
   paths: {
     "/health": {
       get: {
@@ -197,6 +200,67 @@ export const openapiSpec = {
           "204": { description: "Deleted" },
           "404": { description: "Not found" },
           "400": { description: "Invalid id" }
+        }
+      }
+    }
+    ,
+    "/api/marketing/analytics/{campaignId}": {
+      get: {
+        tags: ["marketing-analytics"],
+        summary: "Get aggregated analytics for a campaign",
+        parameters: [
+          { name: "campaignId", in: "path", required: true, schema: { type: "string" } },
+          {
+            name: "includeLogs",
+            in: "query",
+            required: false,
+            description: "If false, skips email_logs aggregation",
+            schema: { type: "boolean", default: true }
+          }
+        ],
+        responses: {
+          "200": { description: "Analytics" },
+          "400": { description: "Invalid campaignId" }
+        }
+      }
+    },
+    "/api/marketing/analytics/{campaignId}/logs": {
+      get: {
+        tags: ["marketing-analytics"],
+        summary: "List email logs for a campaign",
+        parameters: [
+          { name: "campaignId", in: "path", required: true, schema: { type: "string" } },
+          { name: "limit", in: "query", schema: { type: "integer", default: 200 } },
+          { name: "skip", in: "query", schema: { type: "integer", default: 0 } }
+        ],
+        responses: {
+          "200": { description: "Logs list" },
+          "400": { description: "Invalid campaignId" }
+        }
+      }
+    },
+    "/api/marketing/analytics/{campaignId}/seed": {
+      post: {
+        tags: ["marketing-analytics"],
+        summary: "Seed demo metrics and logs for a campaign",
+        parameters: [{ name: "campaignId", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  sent: { type: "integer", description: "Approximate audience size" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "201": { description: "Seeded" },
+          "400": { description: "Invalid campaignId" }
         }
       }
     }
