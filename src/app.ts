@@ -39,6 +39,13 @@ export function createApp(options: AppOptions = {}) {
     res.json(openapiSpec);
   });
 
+  // Swagger UI expects to be served under a path with trailing slash.
+  // Without this, asset requests like /docs/swagger-ui-bundle.js can be
+  // interpreted incorrectly by some proxies/rewrites and return HTML.
+  app.get(["/docs", "/docs/index.html"], (_req: Request, res: Response) => {
+    res.redirect(302, "/docs/");
+  });
+
   app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
 
   // Mongo + routes
