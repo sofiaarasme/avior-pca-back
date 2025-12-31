@@ -7,6 +7,8 @@ import { marketingRouter } from "./modules/marketing/marketing.routes.js";
 import { marketingAnalyticsRouter } from "./modules/marketing/analytics/analytics.routes.js";
 import { openapiSpec } from "./openapi.js";
 import swaggerUi from "swagger-ui-express";
+import path from "path";
+import { fileURLToPath } from "url";
 
 export interface AppOptions {
   /**
@@ -22,6 +24,9 @@ export interface AppOptions {
 export function createApp(options: AppOptions = {}) {
   const CORS_ORIGIN = options.corsOrigin ?? process.env.CORS_ORIGIN ?? "http://localhost:5173";
 
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+
   const app = express();
   app.use(express.json({ limit: "2mb" }));
   app.use(
@@ -31,6 +36,16 @@ export function createApp(options: AppOptions = {}) {
     })
   );
 
+  app.get("/", (_req: Request, res: Response) => {
+    res.json({
+      ok: true,
+      service: "avior-pca-back",
+      docs: "/docs/",
+      openapi: "/openapi.json",
+      time: new Date().toISOString(),
+    });
+  });
+
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ ok: true, service: "avior-pca-back", time: new Date().toISOString() });
   });
@@ -39,9 +54,16 @@ export function createApp(options: AppOptions = {}) {
     res.json(openapiSpec);
   });
 
-  // Swagger UI: mount at a stable, non-slash-suffixed path to avoid proxy rewrite loops.
-  // swagger-ui-express serves its assets under the same base path.
-  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
+  // Swagger UI (Vercel-safe): serve a static HTML that loads swagger-ui assets from a CDN.
+  // This avoids issues where serverless rewrites/proxies can return HTML for JS bundle requests.
+  const publicDir = path.resolve(__dirname, "../public");
+  app.use("/public", express.static(publicDir));
+  app.get(["/docs", "/docs/"], (_req: Request, res: Response) => {
+    res.sendFile(path.join(publicDir, "swagger.html"));
+  });
+
+  // Keep the express-served swagger-ui as a fallback (useful locally).
+  app.use("/docs-express", swaggerUi.serve, swaggerUi.setup(openapiSpec));
 
   // Mongo + routes
   const mongo = createMongoClient();
