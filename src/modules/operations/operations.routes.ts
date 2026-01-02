@@ -83,12 +83,25 @@ operationsRouter.post("/:collection", async (req: Request, res: Response, next: 
   try {
     const collectionName = collectionFromParam(req);
     const db = getDb(req);
+    const user = req.headers["x-user-id"] || "sistema_web"; 
     const payload = req.body ?? {};
+    if (typeof payload !== "object" || Array.isArray(payload)) {
+      return res.status(400).json({ error: "invalid_body" });
+    }
     const now = new Date();
-    const doc = { ...payload, createdAt: now, updatedAt: now };
+    const doc = { 
+      ...payload, 
+      createdAt: now, 
+      updatedAt: now,
+      createdBy: user, 
+      updatedBy: user, 
+      version: 1       
+    };
     const result = await db.collection(collectionName).insertOne(doc);
     res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (e) { next(e); }
+  } catch (e) { 
+    next(e); 
+  }
 });
 
 // 5. PUT /api/operations/:collection/:id (Actualizar)
@@ -97,15 +110,29 @@ operationsRouter.put("/:collection/:id", async (req: Request, res: Response, nex
     const collectionName = collectionFromParam(req);
     const db = getDb(req);
     const _id = parseObjectId(req.params.id);
-    const { _id: _ignored, ...update } = req.body;
+    const user = req.headers["x-user-id"] || "sistema_mobile";
+    const payload = req.body ?? {};
+    if (typeof payload !== "object" || Array.isArray(payload)) {
+      return res.status(400).json({ error: "invalid_body" });
+    }
+    const { _id: _ignored, createdAt: _ignoredDate, createdBy: _ignoredUser, ...updateData } = payload as any;
     const result = await db.collection(collectionName).findOneAndUpdate(
       { _id }, 
-      { $set: { ...update, updatedAt: new Date() } },
+      { 
+        $set: { 
+          ...updateData, 
+          updatedAt: new Date(),
+          updatedBy: user 
+        },
+        $inc: { version: 1 }
+      },
       { returnDocument: "after" }
     );
     if (!result) return res.status(404).json({ error: "not_found" });
     res.json(result);
-  } catch (e) { next(e); }
+  } catch (e) { 
+    next(e); 
+  }
 });
 
 // 6. DELETE /api/operations/:collection/:id (Eliminar)
