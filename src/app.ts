@@ -4,6 +4,7 @@ import "dotenv/config";
 
 import { createMongoClient } from "./lib/mongo.js";
 import { marketingRouter } from "./modules/marketing/marketing.routes.js";
+import { operationsRouter } from "./modules/operations/operations.routes.js";
 import { marketingAnalyticsRouter } from "./modules/marketing/analytics/analytics.routes.js";
 import { openapiSpec } from "./openapi.js";
 import swaggerUi from "swagger-ui-express";
@@ -74,6 +75,7 @@ export function createApp(options: AppOptions = {}) {
 
   app.use("/api/marketing", marketingRouter);
   app.use("/api/marketing/analytics", marketingAnalyticsRouter);
+  app.use("/api/operations", operationsRouter);
 
   // Basic error handler
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

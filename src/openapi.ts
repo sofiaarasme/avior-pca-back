@@ -8,6 +8,7 @@ export const openapiSpec = {
   servers: [{ url: "http://localhost:3001" }],
   tags: [
     { name: "marketing", description: "Marketing module (generic CRUD)" },
+    { name: "operations", description: "Módulo de Operaciones (Vuelos y Notificaciones)" },
     { name: "marketing-analytics", description: "Marketing analytics helpers (metrics + email logs)" }
   ],
   paths: {
@@ -202,8 +203,91 @@ export const openapiSpec = {
           "400": { description: "Invalid id" }
         }
       }
-    }
-    ,
+    },
+    "/api/operations/{collection}": {
+      get: {
+        tags: ["operations"],
+        summary: "List documents (Operations)",
+        parameters: [
+          {
+            name: "collection",
+            in: "path",
+            required: true,
+            schema: { type: "string", enum: ["flights", "notifications"] }
+          }
+        ],
+        responses: { "200": { description: "OK" } }
+      },
+      post: {
+        tags: ["operations"],
+        summary: "Create document (Operations)",
+        parameters: [
+          {
+            name: "collection",
+            in: "path",
+            required: true,
+            schema: { type: "string", enum: ["flights", "notifications"] }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", additionalProperties: true } } }
+        },
+        responses: { "201": { description: "Created" } }
+      }
+    },
+    "/api/operations/{collection}/bulk": {
+      post: {
+        tags: ["operations"],
+        summary: "Bulk insert (Operations)",
+        parameters: [
+          {
+            name: "collection",
+            in: "path",
+            required: true,
+            schema: { type: "string", enum: ["flights", "notifications"] }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "array", items: { type: "object" } } } }
+        },
+        responses: { "201": { description: "Created" } }
+      }
+    },
+    "/api/operations/{collection}/{id}": {
+      get: {
+        tags: ["operations"],
+        summary: "Get document by id (Operations)",
+        parameters: [
+          { name: "collection", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "OK" } }
+      },
+      put: {
+        tags: ["operations"],
+        summary: "Update document (Operations)",
+        parameters: [
+          { name: "collection", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string" } }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } }
+        },
+        responses: { "200": { description: "Updated" } }
+      },
+      delete: {
+        tags: ["operations"],
+        summary: "Delete document (Operations)",
+        parameters: [
+          { name: "collection", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "204": { description: "Deleted" } }
+      }
+    },
     "/api/marketing/analytics/{campaignId}": {
       get: {
         tags: ["marketing-analytics"],
