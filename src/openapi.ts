@@ -5,7 +5,108 @@ export const openapiSpec = {
     version: "0.1.0",
     description: "Backend (Express + MongoDB) - módulo Marketing"
   },
-  servers: [{ url: "http://localhost:3001" }],
+  components: {
+    schemas: {
+      ErrorResponse: {
+        type: "object",
+        properties: { error: { type: "string" } },
+        required: ["error"],
+      },
+      PageInfo: {
+        type: "object",
+        properties: {
+          total: { type: "integer" },
+          skip: { type: "integer" },
+          limit: { type: "integer" },
+        },
+        required: ["total", "skip", "limit"],
+      },
+      ListResponse: {
+        type: "object",
+        properties: {
+          items: { type: "array", items: { type: "object", additionalProperties: true } },
+          page: { $ref: "#/components/schemas/PageInfo" },
+        },
+        required: ["items", "page"],
+      },
+      SegmentCondition: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          field: { type: "string" },
+          operator: { type: "string" },
+          value: {},
+        },
+        required: ["field", "operator"],
+      },
+      Segment: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          _id: { type: "string", description: "MongoDB ObjectId" },
+          name: { type: "string" },
+          description: { type: "string" },
+          operator: { type: "string", enum: ["AND", "OR"], default: "AND" },
+          conditions: { type: "array", items: { $ref: "#/components/schemas/SegmentCondition" } },
+          status: { type: "string", enum: ["active", "paused", "archived"], default: "active" },
+          audienceSize: { type: "integer" },
+          createdAt: { type: "string" },
+          updatedAt: { type: "string" },
+        },
+        required: ["name"],
+        example: {
+          _id: "6650c3b12f2a2c0000000001",
+          name: "Clientes frecuentes",
+          description: "3+ vuelos en el último año",
+          operator: "AND",
+          conditions: [{ field: "totalBookings", operator: "greater_than", value: 3 }],
+          status: "active",
+          audienceSize: 8420,
+          createdAt: "2026-01-02T10:00:00.000Z",
+          updatedAt: "2026-01-02T10:00:00.000Z",
+        },
+      },
+      NotificationDeliveryStats: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          sent: { type: "integer" },
+          delivered: { type: "integer" },
+          failed: { type: "integer" },
+        },
+      },
+      Notification: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          _id: { type: "string", description: "MongoDB ObjectId" },
+          flightId: { type: "string", description: "Foreign identifier for flight (string for now)" },
+          type: { type: "string" },
+          message: { type: "string" },
+          channels: { type: "array", items: { type: "string" } },
+          sentAt: { type: "string" },
+          deliveryStats: { $ref: "#/components/schemas/NotificationDeliveryStats" },
+          createdBy: { type: "string" },
+          createdAt: { type: "string" },
+          updatedAt: { type: "string" },
+        },
+        required: ["type", "message", "channels"],
+        example: {
+          _id: "6650c3b12f2a2c0000000100",
+          flightId: "fl-001",
+          type: "delay",
+          message: "Flight AV-102 delayed by 45 minutes",
+          channels: ["push", "sms"],
+          sentAt: "2026-01-02T10:05:00.000Z",
+          deliveryStats: { sent: 0, delivered: 0, failed: 0 },
+          createdBy: "ops",
+          createdAt: "2026-01-02T10:05:00.000Z",
+          updatedAt: "2026-01-02T10:05:00.000Z",
+        },
+      },
+    },
+  },
   tags: [
     { name: "marketing", description: "Marketing module (generic CRUD)" },
     { name: "marketing-analytics", description: "Marketing analytics helpers (metrics + email logs)" }
@@ -61,9 +162,17 @@ export const openapiSpec = {
         ],
         responses: {
           "200": {
-            description: "List result"
+            description: "List result",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ListResponse" }
+              }
+            }
           },
-          "400": { description: "Invalid collection or query" }
+          "400": {
+            description: "Invalid collection or query",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          }
         }
       },
       post: {
@@ -93,13 +202,29 @@ export const openapiSpec = {
           required: true,
           content: {
             "application/json": {
-              schema: { type: "object", additionalProperties: true }
+              schema: {
+                oneOf: [
+                  { $ref: "#/components/schemas/Segment" },
+                  { $ref: "#/components/schemas/Notification" },
+                  { type: "object", additionalProperties: true }
+                ]
+              }
             }
           }
         },
         responses: {
-          "201": { description: "Created" },
-          "400": { description: "Invalid body" }
+          "201": {
+            description: "Created",
+            content: {
+              "application/json": {
+                schema: { type: "object", additionalProperties: true }
+              }
+            }
+          },
+          "400": {
+            description: "Invalid body",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          }
         }
       }
     },
@@ -129,9 +254,18 @@ export const openapiSpec = {
           { name: "id", in: "path", required: true, schema: { type: "string" } }
         ],
         responses: {
-          "200": { description: "Document" },
-          "404": { description: "Not found" },
-          "400": { description: "Invalid id" }
+          "200": {
+            description: "Document",
+            content: { "application/json": { schema: { type: "object", additionalProperties: true } } }
+          },
+          "404": {
+            description: "Not found",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          },
+          "400": {
+            description: "Invalid id",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          }
         }
       },
       put: {
@@ -162,14 +296,29 @@ export const openapiSpec = {
           required: true,
           content: {
             "application/json": {
-              schema: { type: "object", additionalProperties: true }
+              schema: {
+                oneOf: [
+                  { $ref: "#/components/schemas/Segment" },
+                  { $ref: "#/components/schemas/Notification" },
+                  { type: "object", additionalProperties: true }
+                ]
+              }
             }
           }
         },
         responses: {
-          "200": { description: "Updated" },
-          "404": { description: "Not found" },
-          "400": { description: "Invalid id/body" }
+          "200": {
+            description: "Updated",
+            content: { "application/json": { schema: { type: "object", additionalProperties: true } } }
+          },
+          "404": {
+            description: "Not found",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          },
+          "400": {
+            description: "Invalid id/body",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          }
         }
       },
       delete: {
@@ -198,8 +347,14 @@ export const openapiSpec = {
         ],
         responses: {
           "204": { description: "Deleted" },
-          "404": { description: "Not found" },
-          "400": { description: "Invalid id" }
+          "404": {
+            description: "Not found",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          },
+          "400": {
+            description: "Invalid id",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+          }
         }
       }
     }

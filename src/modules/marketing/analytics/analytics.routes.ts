@@ -39,7 +39,7 @@ marketingAnalyticsRouter.get(
 
       const includeLogs = String(req.query.includeLogs ?? "true") !== "false";
 
-      let logsAgg: any = null;
+      let logsAgg: Record<string, number> | null = null;
       if (includeLogs) {
         const pipeline = [
           { $match: { campaignId } },
@@ -51,8 +51,9 @@ marketingAnalyticsRouter.get(
           },
         ];
 
-        const rows = await db.collection("email_logs").aggregate(pipeline).toArray();
-        logsAgg = rows.reduce<Record<string, number>>((acc, r: any) => {
+        type AggRow = { _id: unknown; count?: number };
+        const rows = (await db.collection("email_logs").aggregate(pipeline).toArray()) as AggRow[];
+        logsAgg = rows.reduce<Record<string, number>>((acc, r) => {
           acc[String(r._id)] = Number(r.count ?? 0);
           return acc;
         }, {});
@@ -126,7 +127,8 @@ marketingAnalyticsRouter.post(
       if (!campaignId) return res.status(400).json({ error: "invalid_campaignId" });
 
       const now = new Date();
-      const base = Math.max(10, toInt((req.body as any)?.sent, 1200));
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const base = Math.max(10, toInt(body.sent, 1200));
 
       const delivered = Math.floor(base * 0.985);
       const uniqueOpens = Math.floor(delivered * 0.52);
@@ -156,7 +158,7 @@ marketingAnalyticsRouter.post(
 
       // Create lightweight sample logs (not 1 per recipient - keep it small)
       const sampleSize = Math.min(base, 500);
-      const logs: any[] = [];
+  const logs: Array<Record<string, unknown>> = [];
       for (let i = 0; i < sampleSize; i++) {
         const recipientId = `seed-${i}`;
         logs.push({
@@ -225,9 +227,10 @@ marketingAnalyticsRouter.post(
 );
 
 // Error normalization
-marketingAnalyticsRouter.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+marketingAnalyticsRouter.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
   if (!err) return next();
-  const status = Number(err.status ?? 500);
-  const message = status < 500 ? String(err.message ?? "bad_request") : "internal_error";
+  // try to extract status/message in a safe way
+  const status = Number((err as { status?: unknown })?.status ?? 500);
+  const message = status < 500 ? String((err as { message?: unknown })?.message ?? "bad_request") : "internal_error";
   res.status(status).json({ error: message });
 });
