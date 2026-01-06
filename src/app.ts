@@ -30,7 +30,8 @@ export function createApp(options: AppOptions = {}) {
     "http://localhost:8080",
     "http://localhost:5173",
     "http://localhost:3000",
-    "https://lovable.dev"
+    "https://lovable.dev",
+    "https://avior-pca-back.vercel.app" 
   ];
 
   // 2. Agregamos el origen de la variable de entorno si existe
