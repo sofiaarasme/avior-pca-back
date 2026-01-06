@@ -23,19 +23,58 @@ export interface AppOptions {
 }
 
 export function createApp(options: AppOptions = {}) {
-  const CORS_ORIGIN = options.corsOrigin ?? process.env.CORS_ORIGIN ?? "http://localhost:5173";
+  // --- CONFIGURACIÓN DE CORS MEJORADA ---
+  
+  // 1. Definimos los orígenes permitidos por defecto (incluyendo tu puerto 8080)
+  const whitelist = [
+    "http://localhost:8080",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://lovable.dev"
+  ];
+
+  // 2. Agregamos el origen de la variable de entorno si existe
+  if (process.env.CORS_ORIGIN) {
+    // Si la variable contiene múltiples URLs separadas por coma, las procesamos todas
+    const envOrigins = process.env.CORS_ORIGIN.split(",").map(o => o.trim());
+    whitelist.push(...envOrigins);
+  }
+
+  // 3. Agregamos los orígenes pasados por opciones al llamar a createApp
+  if (options.corsOrigin) {
+    const opts = Array.isArray(options.corsOrigin) ? options.corsOrigin : [options.corsOrigin];
+    whitelist.push(...opts);
+  }
 
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
 
   const app = express();
   app.use(express.json({ limit: "2mb" }));
+
+  // 4. Aplicamos el Middleware de CORS con lógica de validación
   app.use(
     cors({
-      origin: CORS_ORIGIN,
+      origin: (origin, callback) => {
+        // Permitir peticiones sin origen (como Postman o llamadas entre servidores)
+        if (!origin) return callback(null, true);
+
+        // Verificamos si el origen de la petición comienza con alguno de nuestra lista blanca
+        // Usamos .startsWith para que coincida con las URLs dinámicas de Lovable
+        const isAllowed = whitelist.some(allowed => origin.startsWith(allowed));
+
+        if (isAllowed) {
+          callback(null, true);
+        } else {
+          console.error(`CORS Error: El origen ${origin} no está en la lista blanca.`);
+          callback(new Error("No permitido por CORS"));
+        }
+      },
       credentials: true,
     })
   );
+  
+  // --- RESTO DEL CÓDIGO (SIN CAMBIOS) ---
 
   app.get("/", (_req: Request, res: Response) => {
     res.json({
@@ -55,15 +94,13 @@ export function createApp(options: AppOptions = {}) {
     res.json(openapiSpec);
   });
 
-  // Swagger UI (Vercel-safe): serve a static HTML that loads swagger-ui assets from a CDN.
-  // This avoids issues where serverless rewrites/proxies can return HTML for JS bundle requests.
+  // Swagger UI (Vercel-safe)
   const publicDir = path.resolve(__dirname, "../public");
   app.use("/public", express.static(publicDir));
   app.get(["/docs", "/docs/"], (_req: Request, res: Response) => {
     res.sendFile(path.join(publicDir, "swagger.html"));
   });
 
-  // Keep the express-served swagger-ui as a fallback (useful locally).
   app.use("/docs-express", swaggerUi.serve, swaggerUi.setup(openapiSpec));
 
   // Mongo + routes
@@ -80,7 +117,8 @@ export function createApp(options: AppOptions = {}) {
   // Basic error handler
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     console.error(err);
-    res.status(500).json({ error: "internal_error" });
+    const status = (err as any).status || 500;
+    res.status(status).json({ error: (err as any).message || "internal_error" });
   });
 
   return { app, mongo };
