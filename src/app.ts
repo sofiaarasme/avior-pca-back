@@ -25,9 +25,11 @@ export interface AppOptions {
 }
 
 export function createApp(options: AppOptions = {}) {
-  // --- CONFIGURACIÓN DE CORS MEJORADA ---
+  const app = express();
+
+  // --- CONFIGURACIÓN DE CORS DEFINITIVA ---
   
-  // 1. Definimos los orígenes permitidos por defecto (incluyendo tu puerto 8080)
+  // 1. Lista blanca base
   const whitelist = [
     "http://localhost:8080",
     "http://localhost:5173",
@@ -37,48 +39,51 @@ export function createApp(options: AppOptions = {}) {
     "https://avior-pca-back.vercel.app" 
   ];
 
-  // 2. Agregamos el origen de la variable de entorno si existe
+  // 2. Integración de variables de entorno y opciones
   if (process.env.CORS_ORIGIN) {
-    // Si la variable contiene múltiples URLs separadas por coma, las procesamos todas
     const envOrigins = process.env.CORS_ORIGIN.split(",").map(o => o.trim());
     whitelist.push(...envOrigins);
   }
-
-  // 3. Agregamos los orígenes pasados por opciones al llamar a createApp
   if (options.corsOrigin) {
     const opts = Array.isArray(options.corsOrigin) ? options.corsOrigin : [options.corsOrigin];
     whitelist.push(...opts);
   }
 
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-
-  const app = express();
-  app.use(express.json({ limit: "2mb" }));
-
-  // 4. Aplicamos el Middleware de CORS con lógica de validación
+  // 3. Aplicar Middleware de CORS (Debe ser el primero)
   app.use(
     cors({
       origin: (origin, callback) => {
-        // Permitir peticiones sin origen (como Postman o llamadas entre servidores)
+        // Permitir peticiones sin origen (como Postman o llamadas internas)
         if (!origin) return callback(null, true);
 
-        // Verificamos si el origen de la petición comienza con alguno de nuestra lista blanca
-        // Usamos .startsWith para que coincida con las URLs dinámicas de Lovable
-        const isAllowed = whitelist.some(allowed => origin.startsWith(allowed));
+        // Lógica de validación:
+        // - Si está en la whitelist por coincidencia exacta o inicio (startsWith)
+        // - O si es un subdominio de lovable.app (crucial para previsualizaciones)
+        // - O si es un subdominio de vercel.app
+        const isAllowed = 
+          whitelist.some(domain => origin.startsWith(domain)) || 
+          origin.endsWith(".lovable.app") || 
+          origin.endsWith(".vercel.app");
 
         if (isAllowed) {
           callback(null, true);
         } else {
-          console.error(`CORS Error: El origen ${origin} no está en la lista blanca.`);
+          console.error(`CORS Bloqueado para: ${origin}`);
           callback(new Error("No permitido por CORS"));
         }
       },
       credentials: true,
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "x-user-id", "accept"]
     })
   );
-  
-  // --- RESTO DEL CÓDIGO (SIN CAMBIOS) ---
+
+  app.use(express.json({ limit: "2mb" }));
+
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+
+  // --- RUTAS Y SERVICIOS ---
 
   app.get("/", (_req: Request, res: Response) => {
     res.json({
@@ -107,7 +112,7 @@ export function createApp(options: AppOptions = {}) {
 
   app.use("/docs-express", swaggerUi.serve, swaggerUi.setup(openapiSpec));
 
-  // Mongo + routes
+  // Mongo + routes injection
   const mongo = createMongoClient();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     req.app.locals.mongo = mongo;
@@ -120,11 +125,26 @@ export function createApp(options: AppOptions = {}) {
   app.use("/api/admin", adminRouter);
   app.use("/api/auth", authRouter);
 
-  // Basic error handler
+  // --- MANEJO DE ERRORES ---
+
+  // Middleware para capturar errores 404 de API
+  app.use("/api/*", (req, res) => {
+    res.status(404).json({ error: "endpoint_not_found" });
+  });
+
+  // Global error handler
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    console.error(err);
+    console.error("ERROR INTERNO:", err);
+    
+    // Si el error ocurrió antes de que CORS enviara sus cabeceras, 
+    // forzamos la respuesta JSON para que el navegador no de error de red genérico.
     const status = (err as any).status || 500;
-    res.status(status).json({ error: (err as any).message || "internal_error" });
+    const message = (err as any).message || "internal_error";
+    
+    res.status(status).json({ 
+      error: message,
+      details: process.env.NODE_ENV === "development" ? err : undefined
+    });
   });
 
   return { app, mongo };
