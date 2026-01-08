@@ -110,7 +110,8 @@ export const openapiSpec = {
   tags: [
     { name: "marketing", description: "Marketing module (generic CRUD)" },
     { name: "operations", description: "Módulo de Operaciones (Vuelos y Notificaciones)" },
-    { name: "marketing-analytics", description: "Marketing analytics helpers (metrics + email logs)" }
+    { name: "marketing-analytics", description: "Marketing analytics helpers (metrics + email logs)" },
+    { name: "admin", description: "Módulo de Administración (Organizaciones y Usuarios)" }
   ],
   paths: {
     "/health": {
@@ -368,7 +369,10 @@ export const openapiSpec = {
             name: "collection",
             in: "path",
             required: true,
-            schema: { type: "string", enum: ["flights", "notifications"] }
+            schema: { 
+              type: "string", 
+              enum: ["flights", "status_history", "assignments", "notifications", "action_logs"] 
+            }
           }
         ],
         responses: { "200": { description: "OK" } }
@@ -381,7 +385,10 @@ export const openapiSpec = {
             name: "collection",
             in: "path",
             required: true,
-            schema: { type: "string", enum: ["flights", "notifications"] }
+            schema: { 
+              type: "string", 
+              enum: ["flights", "status_history", "assignments", "notifications", "action_logs"] 
+            }
           }
         ],
         requestBody: {
@@ -400,7 +407,10 @@ export const openapiSpec = {
             name: "collection",
             in: "path",
             required: true,
-            schema: { type: "string", enum: ["flights", "notifications"] }
+            schema: { 
+              type: "string", 
+              enum: ["flights", "status_history", "assignments", "notifications", "action_logs"] 
+            }
           }
         ],
         requestBody: {
@@ -501,6 +511,92 @@ export const openapiSpec = {
           "201": { description: "Seeded" },
           "400": { description: "Invalid campaignId" }
         }
+      }
+    },
+    "/api/admin/{collection}": {
+      get: {
+        tags: ["admin"],
+        summary: "List admin documents",
+        parameters: [
+          {
+            name: "collection",
+            in: "path",
+            required: true,
+            schema: { type: "string", enum: ["organizations", "users"] }
+          },
+          { name: "limit", in: "query", schema: { type: "integer", default: 50 } },
+          { name: "skip", in: "query", schema: { type: "integer", default: 0 } }
+        ],
+        responses: { "200": { description: "OK", content: { "application/json": { schema: { $ref: "#/components/schemas/ListResponse" } } } } }
+      },
+      post: {
+        tags: ["admin"],
+        summary: "Create admin document",
+        parameters: [
+          {
+            name: "collection",
+            in: "path",
+            required: true,
+            schema: { type: "string", enum: ["organizations", "users"] }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } }
+        },
+        responses: { "201": { description: "Created" } }
+      }
+    },
+    "/api/admin/{collection}/bulk": {
+      post: {
+        tags: ["admin"],
+        summary: "Bulk insert admin documents",
+        parameters: [
+          {
+            name: "collection",
+            in: "path",
+            required: true,
+            schema: { type: "string", enum: ["organizations", "users"] }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "array", items: { type: "object" } } } }
+        },
+        responses: { "201": { description: "Created" } }
+      }
+    },
+    "/api/admin/{collection}/{id}": {
+      get: {
+        tags: ["admin"],
+        summary: "Get admin document by id",
+        parameters: [
+          { name: "collection", in: "path", required: true, schema: { type: "string", enum: ["organizations", "users"] } },
+          { name: "id", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "OK" } }
+      },
+      put: {
+        tags: ["admin"],
+        summary: "Update admin document",
+        parameters: [
+          { name: "collection", in: "path", required: true, schema: { type: "string", enum: ["organizations", "users"] } },
+          { name: "id", in: "path", required: true, schema: { type: "string" } }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } }
+        },
+        responses: { "200": { description: "Updated" } }
+      },
+      delete: {
+        tags: ["admin"],
+        summary: "Delete admin document",
+        parameters: [
+          { name: "collection", in: "path", required: true, schema: { type: "string", enum: ["organizations", "users"] } },
+          { name: "id", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "204": { description: "Deleted" } }
       }
     }
   }
