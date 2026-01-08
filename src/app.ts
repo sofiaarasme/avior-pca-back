@@ -33,6 +33,7 @@ export function createApp(options: AppOptions = {}) {
     "http://localhost:5173",
     "http://localhost:3000",
     "https://lovable.dev",
+    "https://lovable.app",
     "https://avior-pca-back.vercel.app" 
   ];
 
