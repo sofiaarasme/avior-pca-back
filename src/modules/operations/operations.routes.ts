@@ -85,9 +85,11 @@ operationsRouter.post("/:collection", async (req: Request, res: Response, next: 
     const db = getDb(req);
     const user = req.headers["x-user-id"] || "sistema_web"; 
     const payload = req.body ?? {};
+    
     if (typeof payload !== "object" || Array.isArray(payload)) {
       return res.status(400).json({ error: "invalid_body" });
     }
+
     const now = new Date();
     const doc = { 
       ...payload, 
@@ -97,8 +99,27 @@ operationsRouter.post("/:collection", async (req: Request, res: Response, next: 
       updatedBy: user, 
       version: 1       
     };
+
     const result = await db.collection(collectionName).insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
+    const insertedId = result.insertedId;
+    if (collectionName === "notifications") {
+      try {
+        await db.collection("status_history").insertOne({
+          organizationId: payload.organizationId ? parseObjectId(payload.organizationId) : null,
+          flightId: payload.flightId ? parseObjectId(payload.flightId) : null,
+          status: payload.type || "NOTIFICATION_SENT",
+          timestamp: now,
+          user: user,
+          remarks: payload.message || "Notificación enviada",
+          notificationId: insertedId,
+          createdAt: now
+        });
+      } catch (histError) {
+        console.error("Error creando historial de notificación:", histError);
+      }
+    }
+
+    res.status(201).json({ _id: insertedId, ...doc });
   } catch (e) { 
     next(e); 
   }
@@ -112,23 +133,59 @@ operationsRouter.put("/:collection/:id", async (req: Request, res: Response, nex
     const _id = parseObjectId(req.params.id);
     const user = req.headers["x-user-id"] || "sistema_mobile";
     const payload = req.body ?? {};
+    
     if (typeof payload !== "object" || Array.isArray(payload)) {
       return res.status(400).json({ error: "invalid_body" });
     }
+    const now = new Date();
     const { _id: _ignored, createdAt: _ignoredDate, createdBy: _ignoredUser, ...updateData } = payload as any;
+    let query: any = { _id };
+    if (collectionName === "flights") {
+      if (typeof payload.version === "undefined") {
+        return res.status(400).json({ error: "version_required_for_conflict_control" });
+      }
+      query.version = Number(payload.version);
+    }
     const result = await db.collection(collectionName).findOneAndUpdate(
-      { _id }, 
+      query, 
       { 
         $set: { 
           ...updateData, 
-          updatedAt: new Date(),
+          updatedAt: now,
           updatedBy: user 
         },
-        $inc: { version: 1 }
+        $inc: { version: 1 } 
       },
       { returnDocument: "after" }
     );
-    if (!result) return res.status(404).json({ error: "not_found" });
+    if (!result) {
+      const actualDoc = await db.collection(collectionName).findOne({ _id });
+      
+      if (actualDoc && collectionName === "flights") {
+        return res.status(409).json({ 
+          error: "conflict", 
+          message: "Ya este vuelo fue actualizado por otra persona. Por favor refresca los datos.",
+          serverVersion: actualDoc.version,
+          yourVersion: payload.version
+        });
+      }
+      return res.status(404).json({ error: "not_found" });
+    }
+    if (collectionName === "flights" && updateData.status) {
+      try {
+        await db.collection("status_history").insertOne({
+          organizationId: result.organizationId ? result.organizationId : null,
+          flightId: _id,
+          status: updateData.status,
+          timestamp: now,
+          user: user,
+          remarks: updateData.remarks || `Estado actualizado a ${updateData.status} (v${result.version})`,
+          createdAt: now
+        });
+      } catch (histError) {
+        console.error("Error creando historial de vuelo:", histError);
+      }
+    }
     res.json(result);
   } catch (e) { 
     next(e); 
@@ -144,6 +201,53 @@ operationsRouter.delete("/:collection/:id", async (req: Request, res: Response, 
     const result = await db.collection(collectionName).deleteOne({ _id });
     if (result.deletedCount === 0) return res.status(404).json({ error: "not_found" });
     res.status(204).send();
+  } catch (e) { next(e); }
+});
+
+// 7. GET /api/operations/my-flights
+// El móvil envía su ID de usuario en los headers o query
+operationsRouter.get("/my-flights", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const db = getDb(req);
+    const userId = req.headers["x-user-id"] as string;
+
+    if (!userId) return res.status(400).json({ error: "user_id_required" });
+
+    const userObjectId = parseObjectId(userId);
+
+    // Usamos Aggregation para buscar asignaciones y traer los datos del vuelo de una vez
+    const myFlights = await db.collection("assignments").aggregate([
+      { 
+        // 1. Buscamos las asignaciones del usuario
+        $match: { userId: userObjectId } 
+      },
+      {
+        // 2. Hacemos un "JOIN" con la colección de flights
+        $lookup: {
+          from: "flights",
+          localField: "flightId",
+          foreignField: "_id",
+          as: "flightData"
+        }
+      },
+      { 
+        // 3. Convertimos el array de flightData en un objeto simple
+        $unwind: "$flightData" 
+      },
+      {
+        // 4. Limpiamos la respuesta para que solo devuelva los datos del vuelo + tu rol
+        $project: {
+          _id: "$flightData._id",
+          flightNumber: "$flightData.flightNumber",
+          status: "$flightData.status",
+          origin: "$flightData.origin",
+          destination: "$flightData.destination",
+          roleInFlight: "$roleInFlight" // Tu rol específico en ese vuelo
+        }
+      }
+    ]).toArray();
+
+    res.json(myFlights);
   } catch (e) { next(e); }
 });
 

@@ -6,6 +6,7 @@ import { createMongoClient } from "./lib/mongo.js";
 import { marketingRouter } from "./modules/marketing/marketing.routes.js";
 import { operationsRouter } from "./modules/operations/operations.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
+import { authRouter } from "./modules/auth/auth.reoutes.js";
 import { marketingAnalyticsRouter } from "./modules/marketing/analytics/analytics.routes.js";
 import { openapiSpec } from "./openapi.js";
 import swaggerUi from "swagger-ui-express";
@@ -116,6 +117,7 @@ export function createApp(options: AppOptions = {}) {
   app.use("/api/marketing/analytics", marketingAnalyticsRouter);
   app.use("/api/operations", operationsRouter);
   app.use("/api/admin", adminRouter);
+  app.use("/api/auth", authRouter);
 
   // Basic error handler
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
