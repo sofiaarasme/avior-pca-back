@@ -40,6 +40,32 @@ export const openapiSpec = {
         },
         required: ["field", "operator"],
       },
+      User: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "MongoDB ObjectId" },
+          email: { type: "string", format: "email" },
+          fullName: { type: "string" },
+          role: { 
+            type: "string", 
+            enum: ["ADMIN", "PILOT", "GROUND_STAFF", "GATE_AGENT"],
+            description: "Rol asignado dentro de la operación"
+          },
+          organizationId: { type: "string", description: "ID de la aerolínea o empresa" },
+          active: { type: "boolean" }
+        },
+        required: ["id", "email", "fullName", "role", "organizationId"]
+      },
+      Organization: {
+        type: "object",
+        properties: {
+          _id: { type: "string" },
+          name: { type: "string" },
+          taxId: { type: "string" },
+          type: { type: "string", enum: ["AIRLINE", "GROUND_HANDLING"] },
+          active: { type: "boolean" }
+        }
+      },
       Segment: {
         type: "object",
         additionalProperties: true,
@@ -108,6 +134,7 @@ export const openapiSpec = {
     },
   },
   tags: [
+    { name: "auth", description: "Autenticación y Sesión" },
     { name: "marketing", description: "Marketing module (generic CRUD)" },
     { name: "operations", description: "Módulo de Operaciones (Vuelos y Notificaciones)" },
     { name: "marketing-analytics", description: "Marketing analytics helpers (metrics + email logs)" },
@@ -120,6 +147,48 @@ export const openapiSpec = {
         responses: {
           "200": {
             description: "OK"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      post: {
+        tags: ["auth"],
+        summary: "Iniciar sesión",
+        description: "Valida credenciales y devuelve los datos del usuario para el móvil/web",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["email", "password"],
+                properties: {
+                  email: { type: "string", format: "email", example: "piloto@avior.com" },
+                  password: { type: "string", example: "123456" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Login exitoso",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    message: { type: "string" },
+                    user: { $ref: "#/components/schemas/User" }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            description: "Credenciales inválidas",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
           }
         }
       }
