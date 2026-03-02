@@ -1,65 +1,62 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
+import { z } from "zod";
+import { MetricModel, EmailLogModel } from "../collections.js";
 
 export const marketingAnalyticsRouter = Router();
 
-function getDb(req: Request) {
-  const mongo = req.app.locals.mongo;
-  if (!mongo) throw new Error("Mongo not initialized");
-  return mongo.db;
+// --- 1. ESQUEMAS DE VALIDACIÓN (ZOD) ---
+
+const CampaignParamsSchema = z.object({
+  campaignId: z.string().min(1, "campaignId es requerido"),
+});
+
+const AnalyticsQuerySchema = z.object({
+  // Convierte "true"/"false" de la URL a booleano real
+  includeLogs: z.preprocess((val) => val === "true" || val === undefined, z.boolean()).optional().default(true),
+});
+
+const PaginationQuerySchema = z.object({
+  limit: z.coerce.number().min(1).max(1000).default(200),
+  skip: z.coerce.number().min(0).default(0),
+});
+
+const SeedBodySchema = z.object({
+  sent: z.coerce.number().min(10).optional().default(1200),
+});
+
+// Interface para el resultado de la agregación (Evita el uso de Record<string, number> genérico)
+interface AggregationResult {
+  _id: string;
+  count: number;
 }
 
-function toInt(value: unknown, fallback: number) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
+// --- 2. RUTAS ---
 
-/**
- * GET /api/marketing/analytics/:campaignId
- * Returns aggregated metrics for a campaign.
- *
- * Sources:
- * - metrics collection: if exists (latest document per campaignId)
- * - email_logs collection: aggregated counts (optional)
- */
 marketingAnalyticsRouter.get(
   "/:campaignId",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const db = getDb(req);
-      const campaignId = String(req.params.campaignId || "").trim();
-      if (!campaignId) return res.status(400).json({ error: "invalid_campaignId" });
+      const { campaignId } = CampaignParamsSchema.parse(req.params);
+      const { includeLogs } = AnalyticsQuerySchema.parse(req.query);
 
-      // latest explicit metrics doc (if any)
-      const metricsDoc = await db
-        .collection("metrics")
-        .find({ campaignId })
-        .sort({ createdAt: -1, _id: -1 })
-        .limit(1)
-        .next();
-
-      const includeLogs = String(req.query.includeLogs ?? "true") !== "false";
+      // Usamos .lean() para obtener un objeto JS puro (más rápido)
+      const metricsDoc = await MetricModel.findOne({ campaignId }).sort({ createdAt: -1 }).lean();
 
       let logsAgg: Record<string, number> | null = null;
-      if (includeLogs) {
-        const pipeline = [
-          { $match: { campaignId } },
-          {
-            $group: {
-              _id: "$event",
-              count: { $sum: 1 },
-            },
-          },
-        ];
 
-        type AggRow = { _id: unknown; count?: number };
-        const rows = (await db.collection("email_logs").aggregate(pipeline).toArray()) as AggRow[];
-        logsAgg = rows.reduce<Record<string, number>>((acc, r) => {
-          acc[String(r._id)] = Number(r.count ?? 0);
+      if (includeLogs) {
+        // Tipamos el resultado de la agregación
+        const rows = await EmailLogModel.aggregate<AggregationResult>([
+          { $match: { campaignId } },
+          { $group: { _id: "$event", count: { $sum: 1 } } },
+        ]);
+
+        logsAgg = rows.reduce((acc, r) => {
+          acc[r._id] = r.count;
           return acc;
-        }, {});
+        }, {} as Record<string, number>);
       }
 
-      // normalize output
       const statsFromLogs = logsAgg
         ? {
             sent: logsAgg.sent ?? 0,
@@ -76,59 +73,41 @@ marketingAnalyticsRouter.get(
 
       res.json({
         campaignId,
-        metrics: metricsDoc ?? null,
+        metrics: metricsDoc,
         logs: logsAgg,
         stats: statsFromLogs,
       });
-    } catch (e) {
-      next(e);
-    }
+    } catch (e) { next(e); }
   }
 );
 
-/**
- * GET /api/marketing/analytics/:campaignId/logs
- * Returns email logs for a campaign (paginated).
- */
 marketingAnalyticsRouter.get(
   "/:campaignId/logs",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const db = getDb(req);
-      const campaignId = String(req.params.campaignId || "").trim();
-      if (!campaignId) return res.status(400).json({ error: "invalid_campaignId" });
+      const { campaignId } = CampaignParamsSchema.parse(req.params);
+      const { limit, skip } = PaginationQuerySchema.parse(req.query);
 
-      const limit = Math.min(toInt(req.query.limit, 200), 1000);
-      const skip = Math.max(toInt(req.query.skip, 0), 0);
-
-      const col = db.collection("email_logs");
       const [items, total] = await Promise.all([
-        col.find({ campaignId }).sort({ timestamp: -1, _id: -1 }).skip(skip).limit(limit).toArray(),
-        col.countDocuments({ campaignId }),
+        EmailLogModel.find({ campaignId })
+          .sort({ timestamp: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        EmailLogModel.countDocuments({ campaignId }),
       ]);
 
       res.json({ items, page: { total, skip, limit } });
-    } catch (e) {
-      next(e);
-    }
+    } catch (e) { next(e); }
   }
 );
 
-/**
- * POST /api/marketing/analytics/:campaignId/seed
- * Seeds demo metrics and logs for a campaign.
- */
 marketingAnalyticsRouter.post(
   "/:campaignId/seed",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const db = getDb(req);
-      const campaignId = String(req.params.campaignId || "").trim();
-      if (!campaignId) return res.status(400).json({ error: "invalid_campaignId" });
-
-      const now = new Date();
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  const base = Math.max(10, toInt(body.sent, 1200));
+      const { campaignId } = CampaignParamsSchema.parse(req.params);
+      const { sent: base } = SeedBodySchema.parse(req.body);
 
       const delivered = Math.floor(base * 0.985);
       const uniqueOpens = Math.floor(delivered * 0.52);
@@ -139,7 +118,9 @@ marketingAnalyticsRouter.post(
       const unsubscribes = Math.max(0, Math.floor(delivered * 0.002));
       const complaints = Math.max(0, Math.floor(delivered * 0.0005));
 
-      const metricsDoc = {
+      // SOLUCIÓN AL ERROR TS(2769): 
+      // Eliminamos createdAt y updatedAt porque Mongoose los maneja solo
+      const metricsDoc = await MetricModel.create({
         campaignId,
         sent: base,
         delivered,
@@ -149,88 +130,63 @@ marketingAnalyticsRouter.post(
         uniqueClicks,
         bounces,
         complaints,
-        unsubscribes,
-        createdAt: now,
-        updatedAt: now,
-      };
+        unsubscribes
+      });
 
-      const insertMetrics = await db.collection("metrics").insertOne(metricsDoc);
-
-      // Create lightweight sample logs (not 1 per recipient - keep it small)
       const sampleSize = Math.min(base, 500);
-  const logs: Array<Record<string, unknown>> = [];
+      const logsToInsert = [];
+      const now = new Date();
+
       for (let i = 0; i < sampleSize; i++) {
         const recipientId = `seed-${i}`;
-        logs.push({
+        const email = `seed${i}@example.com`;
+        
+        logsToInsert.push({
           campaignId,
           recipientId,
-          to: `seed${i}@example.com`,
+          to: email,
           event: "sent",
           timestamp: now,
-          meta: { seeded: true },
-          createdAt: now,
-          updatedAt: now,
+          meta: { seeded: true }
         });
+
+        if (i < Math.floor(sampleSize * 0.985)) {
+          logsToInsert.push({ campaignId, recipientId, to: email, event: "delivered", timestamp: now, meta: { seeded: true } });
+        }
+        if (i < Math.floor(sampleSize * 0.52)) {
+          logsToInsert.push({ campaignId, recipientId, to: email, event: "open", timestamp: now, meta: { seeded: true } });
+        }
+        if (i < Math.floor(sampleSize * 0.18)) {
+          logsToInsert.push({ campaignId, recipientId, to: email, event: "click", timestamp: now, meta: { seeded: true } });
+        }
       }
 
-      // a subset delivered
-      for (let i = 0; i < Math.floor(sampleSize * 0.985); i++) {
-        const recipientId = `seed-${i}`;
-        logs.push({
-          campaignId,
-          recipientId,
-          to: `seed${i}@example.com`,
-          event: "delivered",
-          timestamp: now,
-          meta: { seeded: true },
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
+      await EmailLogModel.insertMany(logsToInsert);
 
-      // opens/clicks
-      for (let i = 0; i < Math.floor(sampleSize * 0.52); i++) {
-        const recipientId = `seed-${i}`;
-        logs.push({
-          campaignId,
-          recipientId,
-          to: `seed${i}@example.com`,
-          event: "open",
-          timestamp: now,
-          meta: { seeded: true },
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-      for (let i = 0; i < Math.floor(sampleSize * 0.18); i++) {
-        const recipientId = `seed-${i}`;
-        logs.push({
-          campaignId,
-          recipientId,
-          to: `seed${i}@example.com`,
-          event: "click",
-          timestamp: now,
-          meta: { seeded: true, url: "/ofertas/demo" },
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-
-      await db.collection("email_logs").insertMany(logs);
-
-      const created = await db.collection("metrics").findOne({ _id: insertMetrics.insertedId });
-      res.status(201).json({ ok: true, metrics: created, logsInserted: logs.length });
-    } catch (e) {
-      next(e);
-    }
+      res.status(201).json({ 
+        ok: true, 
+        metrics: metricsDoc, 
+        logsInserted: logsToInsert.length 
+      });
+    } catch (e) { next(e); }
   }
 );
 
-// Error normalization
-marketingAnalyticsRouter.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
-  if (!err) return next();
-  // try to extract status/message in a safe way
-  const status = Number((err as { status?: unknown })?.status ?? 500);
-  const message = status < 500 ? String((err as { message?: unknown })?.message ?? "bad_request") : "internal_error";
+// --- 3. MANEJO DE ERRORES (SIN ANY) ---
+
+marketingAnalyticsRouter.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof z.ZodError) {
+    return res.status(400).json({ 
+      error: "validation_error", 
+      details: err.issues.map(i => ({ path: i.path, message: i.message })) 
+    });
+  }
+
+  // Tipado seguro para errores desconocidos
+  const status = (err as { status?: number }).status || 500;
+  const message = status < 500 ? (err as Error).message : "internal_error";
+  
+  if (status >= 500) console.error(err);
+
   res.status(status).json({ error: message });
 });

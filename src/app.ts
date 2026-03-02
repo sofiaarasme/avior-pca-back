@@ -133,17 +133,12 @@ export function createApp(options: AppOptions = {}) {
   });
 
   // Global error handler
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    console.error("ERROR INTERNO:", err);
-    
-    // Si el error ocurrió antes de que CORS enviara sus cabeceras, 
-    // forzamos la respuesta JSON para que el navegador no de error de red genérico.
-    const status = (err as any).status || 500;
-    const message = (err as any).message || "internal_error";
-    
-    res.status(status).json({ 
-      error: message,
-      details: process.env.NODE_ENV === "development" ? err : undefined
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    console.error("ERROR CAPTURADO:", err); // Esto imprime el error en la terminal
+
+    res.status(err.status || 500).json({ 
+      error: err.message || "internal_error", // <--- Cambia esto para ver el mensaje real
+      stack: err.stack, // <--- Esto te dirá la línea exacta del error
     });
   });
 

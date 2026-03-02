@@ -1,192 +1,210 @@
-// src/modules/admin/admin.routes.ts
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { ObjectId } from "mongodb";
-import { isAdminCollectionName, type AdminCollectionName } from "./collections.js";
+import { z } from "zod";
+import { OrganizationModel, UserModel } from "./collections.js";
 
 export const adminRouter = Router();
 
-// Helper para obtener la DB
-function getDb(req: Request) {
-  const mongo = req.app.locals.mongo;
-  if (!mongo) throw new Error("Mongo not initialized");
-  return mongo.db;
-}
+// --- ESQUEMAS DE VALIDACIÓN (ZOD) ---
+console.log("Cargando rutas de Admin...");
+adminRouter.get("/test", (req, res) => res.send("OK"));
+const OrganizationSchemaZod = z.object({
+  name: z.string().min(2),
+  taxId: z.string().min(5),
+  logo: z.string().url().optional(),
+  colors: z.object({
+    main: z.string(),
+    secondary: z.string(),
+    accent: z.string(),
+  }),
+  type: z.enum(["AIRLINE", "GROUND_HANDLING"]),
+  active: z.boolean().optional(),
+});
 
-// Helper para validar la colección permitida en Admin
-function collectionFromParam(req: Request): AdminCollectionName {
-  const c = req.params.collection;
-  if (!isAdminCollectionName(c)) {
-    const err: any = new Error("Invalid admin collection");
-    err.status = 400;
-    throw err;
-  }
-  return c;
-}
-
-function parseObjectId(id: string) {
-  if (!ObjectId.isValid(id)) {
-    const err: any = new Error("Invalid id");
-    err.status = 400;
-    throw err;
-  }
-  return new ObjectId(id);
-}
+const UserSchemaZod = z.object({
+  organizationId: z.string().uuid("ID de organización inválido"),
+  email: z.string().email(),
+  user: z.string().min(3),
+  password: z.string().min(6).optional(),
+  fullName: z.string().min(3),
+  role: z.enum(["ADMIN", "PILOT", "GROUND_STAFF", "GATE_AGENT"]),
+  fcmToken: z.string().optional(),
+  active: z.boolean().optional(),
+});
 
 /**
- * Procesa el cuerpo de la petición para convertir strings de ID en ObjectIds reales
- * Especialmente necesario para 'organizationId' en la colección de usuarios.
+ * Middleware de validación corregido
+ * Usamos z.ZodSchema para evitar el error de AnyZodObject
  */
-function preparePayload(payload: any) {
-  const data = { ...payload };
-  // Si viene un organizationId como string, lo convertimos
-  if (data.organizationId && typeof data.organizationId === "string") {
-    data.organizationId = parseObjectId(data.organizationId);
-  }
-  return data;
-}
+const validate = (schema: z.ZodSchema) => 
+  async (req: Request, _res: Response, next: NextFunction) => {
+    try {
+      // parseAsync valida y devuelve el objeto limpio
+      req.body = await schema.parseAsync(req.body);
+      next();
+    } catch (error) {
+      next({ status: 400, message: error });
+    }
+  };
 
-// 1. GET /api/admin/:collection (Listar)
-adminRouter.get("/:collection", async (req: Request, res: Response, next: NextFunction) => {
+// --- RUTAS DE ORGANIZACIONES ---
+
+// 1. Listar Organizaciones
+adminRouter.get("/organizations", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
     const limit = Math.min(Number(req.query.limit ?? 50), 200);
     const skip = Math.max(Number(req.query.skip ?? 0), 0);
 
-    // Filtro opcional por organización si viene en el query
-    const filter: any = {};
-    if (req.query.organizationId) {
-      filter.organizationId = parseObjectId(req.query.organizationId as string);
-    }
-
-    const col = db.collection(collectionName);
     const [items, total] = await Promise.all([
-      col.find(filter).sort({ name: 1, _id: -1 }).skip(skip).limit(limit).toArray(),
-      col.countDocuments(filter)
+      OrganizationModel.find().sort({ name: 1 }).skip(skip).limit(limit),
+      OrganizationModel.countDocuments()
     ]);
 
     res.json({ items, page: { total, skip, limit } });
   } catch (e) { next(e); }
 });
 
-// 2. POST /api/admin/:collection/bulk (Carga masiva)
-adminRouter.post("/:collection/bulk", async (req: Request, res: Response, next: NextFunction) => {
+// 2. Crear Organización
+adminRouter.post("/organizations", validate(OrganizationSchemaZod), async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const docs = Array.isArray(req.body) ? req.body : [];
-    
-    if (docs.length === 0) return res.status(400).json({ error: "empty_array" });
+    const newOrg = new OrganizationModel({
+      ...req.body,
+      // Mantenemos la lógica de auditoría que tenías
+      createdBy: req.headers["x-user-id"] || "admin_system",
+      version: 1
+    });
+    await newOrg.save();
+    res.status(201).json(newOrg);
+  } catch (e) { next(e); }
+});
 
+// 3. Carga masiva Organizaciones
+adminRouter.post("/organizations/bulk", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const docs = Array.isArray(req.body) ? req.body : [];
+    if (docs.length === 0) return res.status(400).json({ error: "empty_array" });
+    
+    // Validamos cada documento con el esquema de Zod
+    const validatedDocs = docs.map(d => OrganizationSchemaZod.parse(d));
+    
     const now = new Date();
-    const docsToInsert = docs.map(d => ({
-      ...preparePayload(d),
+    const docsToInsert = validatedDocs.map(d => ({
+      ...d,
       createdAt: now,
       updatedAt: now,
       version: 1
     }));
 
-    const result = await db.collection(collectionName).insertMany(docsToInsert);
-    res.status(201).json({ insertedCount: result.insertedCount, ids: result.insertedIds });
+    const result = await OrganizationModel.insertMany(docsToInsert);
+    res.status(201).json({ insertedCount: result.length, items: result });
   } catch (e) { next(e); }
 });
 
-// 3. GET /api/admin/:collection/:id (Obtener uno)
-adminRouter.get("/:collection/:id", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const _id = parseObjectId(req.params.id);
-    const doc = await db.collection(collectionName).findOne({ _id });
-    if (!doc) return res.status(404).json({ error: "not_found" });
-    res.json(doc);
-  } catch (e) { next(e); }
-});
-
-// 4. POST /api/admin/:collection (Crear uno)
-adminRouter.post("/:collection", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const creator = req.headers["x-user-id"] || "admin_system"; 
-    
-    let payload = req.body ?? {};
-    if (typeof payload !== "object" || Array.isArray(payload)) {
-      return res.status(400).json({ error: "invalid_body" });
-    }
-
-    payload = preparePayload(payload);
-
-    const now = new Date();
-    const doc = { 
-      ...payload, 
-      createdAt: now, 
-      updatedAt: now,
-      createdBy: creator,
-      active: payload.active ?? true,
-      version: 1       
-    };
-
-    const result = await db.collection(collectionName).insertOne(doc);
-    res.status(201).json({ _id: result.insertedId, ...doc });
-  } catch (e) { next(e); }
-});
-
-// 5. PUT /api/admin/:collection/:id (Actualizar)
-adminRouter.put("/:collection/:id", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const _id = parseObjectId(req.params.id);
-    const updater = req.headers["x-user-id"] || "admin_system";
-
-    let payload = req.body ?? {};
-    if (typeof payload !== "object" || Array.isArray(payload)) {
-      return res.status(400).json({ error: "invalid_body" });
-    }
-
-    // Limpiamos el payload para no sobreescribir campos críticos
-    const { _id: _ignored, createdAt: _ignoredDate, createdBy: _ignoredUser, ...updateData } = payload as any;
-    const finalUpdateData = preparePayload(updateData);
-
-    const result = await db.collection(collectionName).findOneAndUpdate(
-      { _id }, 
-      { 
-        $set: { 
-          ...finalUpdateData, 
-          updatedAt: new Date(),
-          updatedBy: updater 
+// 4. Rutas por ID de Organización (GET, PUT, DELETE)
+adminRouter.route("/organizations/:id")
+  .get(async (req, res, next) => {
+    try {
+      const doc = await OrganizationModel.findById(req.params.id);
+      if (!doc) return res.status(404).json({ error: "not_found" });
+      res.json(doc);
+    } catch (e) { next(e); }
+  })
+  .put(validate(OrganizationSchemaZod.partial()), async (req, res, next) => {
+    try {
+      const updater = req.headers["x-user-id"] || "admin_system";
+      const doc = await OrganizationModel.findByIdAndUpdate(
+        req.params.id,
+        { 
+          $set: { ...req.body, updatedAt: new Date(), updatedBy: updater },
+          $inc: { version: 1 } 
         },
-        $inc: { version: 1 }
-      },
-      { returnDocument: "after" }
-    );
+        { new: true }
+      );
+      if (!doc) return res.status(404).json({ error: "not_found" });
+      res.json(doc);
+    } catch (e) { next(e); }
+  })
+  .delete(async (req, res, next) => {
+    try {
+      const result = await OrganizationModel.findByIdAndDelete(req.params.id);
+      if (!result) return res.status(404).json({ error: "not_found" });
+      res.status(204).send();
+    } catch (e) { next(e); }
+  });
 
-    if (!result) return res.status(404).json({ error: "not_found" });
-    res.json(result);
-  } catch (e) { next(e); }
-});
 
-// 6. DELETE /api/admin/:collection/:id (Eliminar)
-adminRouter.delete("/:collection/:id", async (req: Request, res: Response, next: NextFunction) => {
+// --- RUTAS DE USUARIOS ---
+
+// 1. Listar Usuarios
+adminRouter.get("/users", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const _id = parseObjectId(req.params.id);
+    const limit = Math.min(Number(req.query.limit ?? 50), 200);
+    const skip = Math.max(Number(req.query.skip ?? 0), 0);
     
-    // NOTA: En Admin, a veces es mejor hacer "Soft Delete" (active: false)
-    // Pero para mantener consistencia con tu módulo de operaciones, usamos delete real:
-    const result = await db.collection(collectionName).deleteOne({ _id });
-    
-    if (result.deletedCount === 0) return res.status(404).json({ error: "not_found" });
-    res.status(204).send();
+    const filter: Record<string, any> = {};
+    if (req.query.organizationId) filter.organizationId = req.query.organizationId;
+
+    const [items, total] = await Promise.all([
+      UserModel.find(filter).populate('organizationId').skip(skip).limit(limit),
+      UserModel.countDocuments(filter)
+    ]);
+
+    res.json({ items, page: { total, skip, limit } });
   } catch (e) { next(e); }
 });
 
-// Normalización de Errores
-adminRouter.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-  if (!err) return next();
-  const status = Number(err.status ?? 500);
-  const message = status < 500 ? String(err.message ?? "bad_request") : "internal_error";
+// 2. Crear Usuario
+adminRouter.post("/users", validate(UserSchemaZod), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const newUser = new UserModel({
+      ...req.body,
+      createdBy: req.headers["x-user-id"] || "admin_system",
+      version: 1
+    });
+    await newUser.save();
+    res.status(201).json(newUser);
+  } catch (e) { next(e); }
+});
+
+// 3. Rutas por ID de Usuario
+adminRouter.route("/users/:id")
+  .get(async (req, res, next) => {
+    try {
+      const doc = await UserModel.findById(req.params.id).populate('organizationId');
+      if (!doc) return res.status(404).json({ error: "not_found" });
+      res.json(doc);
+    } catch (e) { next(e); }
+  })
+  .put(validate(UserSchemaZod.partial()), async (req, res, next) => {
+    try {
+      const doc = await UserModel.findByIdAndUpdate(
+        req.params.id,
+        { $set: req.body, $inc: { version: 1 } },
+        { new: true }
+      );
+      if (!doc) return res.status(404).json({ error: "not_found" });
+      res.json(doc);
+    } catch (e) { next(e); }
+  })
+  .delete(async (req, res, next) => {
+    try {
+      const result = await UserModel.findByIdAndDelete(req.params.id);
+      if (!result) return res.status(404).json({ error: "not_found" });
+      res.status(204).send();
+    } catch (e) { next(e); }
+  });
+
+// --- MANEJO DE ERRORES CENTRALIZADO ---
+adminRouter.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  // Errores de Zod
+  if (err instanceof z.ZodError) {
+    return res.status(400).json({ 
+      error: "validation_error", 
+      details: err.issues.map(e => ({ path: e.path, message: e.message }))
+    });
+  }
+
+  const status = err.status || 500;
+  const message = status < 500 ? err.message : "internal_error";
+  
   res.status(status).json({ error: message });
 });

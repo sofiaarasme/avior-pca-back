@@ -1,340 +1,343 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { ObjectId } from "mongodb";
-import { isMarketingCollectionName, type MarketingCollectionName } from "./collections.js";
+import { z } from "zod";
+import { 
+  CampaignModel, 
+  TemplateModel, 
+  MetricModel, 
+  EmailLogModel 
+} from "./collections.js"; // Asegúrate de que este archivo exporte los modelos de Mongoose
 
 export const marketingRouter = Router();
 
-let indexesEnsured = false;
+// --- 1. ESQUEMAS DE VALIDACIÓN (ZOD) ---
+// Esto sustituye a tus interfaces manuales y asegura "Any-less" code.
 
-function getDb(req: Request) {
-  const mongo = req.app.locals.mongo;
-  if (!mongo) throw new Error("Mongo not initialized");
-  return mongo.db;
-}
+const CampaignSchemaZod = z.object({
+  name: z.string().min(3, "El nombre debe tener al menos 3 caracteres"),
+  subject: z.string().min(1, "El asunto es obligatorio"),
+  templateId: z.string().uuid("Template ID debe ser un UUID válido"),
+  segmentId: z.string().min(1, "Segment ID es obligatorio"),
+  status: z.enum(["DRAFT", "SCHEDULED", "SENDING", "SENT", "ARCHIVED"]).default("DRAFT"),
+  scheduledAt: z.coerce.date().optional(),
+  createdBy: z.string().min(1, "El creador es obligatorio"),
+});
 
-function collectionFromParam(req: Request): MarketingCollectionName {
-  const c = req.params.collection;
-  if (!isMarketingCollectionName(c)) {
-    const err = new Error("Invalid collection") as Error & { status?: number };
-    err.status = 400;
-    throw err;
-  }
-  return c;
-}
+const TemplateSchemaZod = z.object({
+  name: z.string().min(3),
+  content: z.string().min(1),
+  active: z.boolean().default(true),
+});
 
-function parseObjectId(id: string) {
-  if (!ObjectId.isValid(id)) {
-    const err = new Error("Invalid id") as Error & { status?: number };
-    err.status = 400;
-    throw err;
-  }
-  return new ObjectId(id);
-}
+const MetricSchemaZod = z.object({
+  campaignId: z.string().uuid(),
+  sent: z.number().nonnegative().default(0),
+  delivered: z.number().nonnegative().default(0),
+  opens: z.number().nonnegative().default(0),
+  clicks: z.number().nonnegative().default(0),
+});
 
-function parseSort(raw: unknown): Record<string, 1 | -1> {
-  if (!raw || typeof raw !== "string") return { _id: -1 };
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const out: Record<string, 1 | -1> = {};
-    for (const [k, v] of Object.entries(parsed)) {
-      if (v === 1 || v === -1) out[k] = v;
+/**
+ * Esquema para validación de Query Params (Paginación y Filtros)
+ * Sustituye a las funciones manuales de parseSort y limit/skip
+ */
+const QuerySchemaZod = z.object({
+  limit: z.coerce.number().min(1).max(200).default(50),
+  skip: z.coerce.number().min(0).default(0),
+  q: z.string().optional(), // Para búsquedas de texto
+  sortBy: z.string().default("createdAt"),
+  order: z.enum(["asc", "desc"]).default("desc"),
+});
+
+// --- 2. MIDDLEWARES DE APOYO ---
+
+/**
+ * Middleware de validación genérico
+ * Elimina el uso de 'any' y asegura que req.body esté limpio
+ */
+const validate = (schema: z.ZodSchema) => 
+  async (req: Request, _res: Response, next: NextFunction) => {
+    try {
+      req.body = await schema.parseAsync(req.body);
+      next();
+    } catch (error) {
+      next(error); // El error será capturado por el manejador centralizado
     }
-    return Object.keys(out).length ? out : { _id: -1 };
-  } catch {
-    return { _id: -1 };
-  }
-}
-
-type SegmentCondition = {
-  id?: string;
-  field: string;
-  operator: string;
-  value: unknown;
-};
-
-type SegmentDoc = {
-  name: string;
-  description?: string;
-  operator?: "AND" | "OR";
-  conditions?: SegmentCondition[];
-  status?: "active" | "paused" | "archived";
-  audienceSize?: number;
-  createdAt?: Date | string;
-  updatedAt?: Date;
-};
-
-type NotificationDoc = {
-  flightId?: string;
-  type: string;
-  message: string;
-  channels: string[];
-  sentAt?: string;
-  deliveryStats?: { sent?: number; delivered?: number; failed?: number };
-  createdBy?: string;
-  createdAt?: Date | string;
-  updatedAt?: Date;
-};
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function validateSegmentPayload(payload: unknown): SegmentDoc {
-  if (!isPlainObject(payload)) {
-    const err = new Error("invalid_body") as Error & { status?: number };
-    err.status = 400;
-    throw err;
-  }
-
-  const name = String(payload.name ?? "").trim();
-  if (!name) {
-    const err = new Error("missing_name") as Error & { status?: number };
-    err.status = 400;
-    throw err;
-  }
-
-  const operatorRaw = payload.operator;
-  const operator = operatorRaw === "OR" ? "OR" : "AND";
-
-  const conditionsRaw = payload.conditions;
-  const conditions = Array.isArray(conditionsRaw)
-    ? (conditionsRaw
-        .filter((c): c is Record<string, unknown> => isPlainObject(c))
-        .map((c) => ({
-          id: typeof c.id === "string" ? c.id : undefined,
-          field: String(c.field ?? ""),
-          operator: String(c.operator ?? ""),
-          value: c.value,
-        }))
-        .filter((c) => c.field && c.operator))
-    : [];
-
-  return {
-    name,
-    description: typeof payload.description === "string" ? payload.description : undefined,
-    operator,
-    conditions,
-    status:
-      payload.status === "paused" || payload.status === "archived" || payload.status === "active"
-        ? payload.status
-        : "active",
-    audienceSize: typeof payload.audienceSize === "number" ? payload.audienceSize : undefined,
-    createdAt: payload.createdAt instanceof Date || typeof payload.createdAt === "string" ? payload.createdAt : undefined,
   };
-}
 
-function validateNotificationPayload(payload: unknown): NotificationDoc {
-  if (!isPlainObject(payload)) {
-    const err = new Error("invalid_body") as Error & { status?: number };
-    err.status = 400;
-    throw err;
-  }
+/**
+ * Utility para construir el sort de Mongoose sin usar JSON.parse inseguro
+ */
+const getSortOptions = (sortBy: string, order: "asc" | "desc"): Record<string, 1 | -1> => {
+  return { [sortBy]: order === "asc" ? 1 : -1 };
+};
 
-  const type = String(payload.type ?? "").trim();
-  const message = String(payload.message ?? "").trim();
-  const channelsRaw = payload.channels;
-  const channels = Array.isArray(channelsRaw)
-    ? channelsRaw.map((c) => String(c)).filter(Boolean)
-    : [];
+const SegmentSchemaZod = z.object({
+  name: z.string().min(1, "missing_name"),
+  description: z.string().optional(),
+  operator: z.enum(["AND", "OR"]).default("AND"),
+  status: z.enum(["active", "paused", "archived"]).default("active"),
+  conditions: z.array(z.object({
+    id: z.string().optional(),
+    field: z.string().min(1),
+    operator: z.string().min(1),
+    value: z.unknown()
+  })).default([]),
+  audienceSize: z.number().optional(),
+});
 
-  if (!type) {
-    const err = new Error("missing_type") as Error & { status?: number };
-    err.status = 400;
-    throw err;
-  }
-  if (!message) {
-    const err = new Error("missing_message") as Error & { status?: number };
-    err.status = 400;
-    throw err;
-  }
+const NotificationPayloadSchemaZod = z.object({
+  flightId: z.string().optional(),
+  type: z.string().min(1, "missing_type"),
+  message: z.string().min(1, "missing_message"),
+  channels: z.array(z.string()).default([]),
+  sentAt: z.string().datetime().optional(),
+  deliveryStats: z.object({
+    sent: z.number().optional(),
+    delivered: z.number().optional(),
+    failed: z.number().optional(),
+  }).optional(),
+  createdBy: z.string().optional(),
+});
 
+// --- 2. LÓGICA DE BÚSQUEDA REUTILIZABLE (Sin Any) ---
+
+/**
+ * Procesa la búsqueda de texto 'q' para Mongoose
+ */
+const getSearchFilter = (q?: string) => {
+  if (!q) return {};
+  const searchRegex = { $regex: q, $options: "i" };
   return {
-    flightId: typeof payload.flightId === "string" ? payload.flightId : undefined,
-    type,
-    message,
-    channels,
-    sentAt: typeof payload.sentAt === "string" ? payload.sentAt : undefined,
-    deliveryStats: isPlainObject(payload.deliveryStats)
-      ? {
-          sent: typeof payload.deliveryStats.sent === "number" ? payload.deliveryStats.sent : undefined,
-          delivered: typeof payload.deliveryStats.delivered === "number" ? payload.deliveryStats.delivered : undefined,
-          failed: typeof payload.deliveryStats.failed === "number" ? payload.deliveryStats.failed : undefined,
-        }
-      : undefined,
-    createdBy: typeof payload.createdBy === "string" ? payload.createdBy : undefined,
-    createdAt: payload.createdAt instanceof Date || typeof payload.createdAt === "string" ? payload.createdAt : undefined,
+    $or: [
+      { name: searchRegex },
+      { subject: searchRegex },
+      { title: searchRegex },
+      { email: searchRegex },
+      { message: searchRegex }
+    ]
   };
-}
+};
 
-async function ensureIndexes(db: ReturnType<typeof getDb>) {
-  // Avoid re-creating indexes per request (per process)
-  if (indexesEnsured) return;
+// --- 3. RUTAS EXPLÍCITAS (Elimina el acceso dinámico /:collection) ---
 
-  await Promise.all([
-    db.collection("segments").createIndex({ name: 1 }, { unique: false }),
-    db.collection("segments").createIndex({ status: 1, updatedAt: -1 }),
-    db.collection("notifications").createIndex({ sentAt: -1, _id: -1 }),
-    db.collection("notifications").createIndex({ flightId: 1, sentAt: -1 }),
-    db.collection("recipients").createIndex({ email: 1 }),
-    db.collection("flights").createIndex({ flightNumber: 1, operationDate: 1 }),
-  ]);
-
-  indexesEnsured = true;
-}
-
-// GET /api/marketing/:collection?limit=&skip=&sort=&q=
-marketingRouter.get("/:collection", async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * @openapi
+ * /api/marketing/campaigns:
+ *   get:
+ *     summary: Listar campañas con filtros y paginación
+ *     tags: [Marketing]
+ */
+marketingRouter.get("/campaigns", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    await ensureIndexes(db);
+    const { limit, skip, q, sortBy, order } = QuerySchemaZod.parse(req.query);
+    const filter = getSearchFilter(q);
+    const sort = getSortOptions(sortBy, order);
 
-    const limit = Math.min(Number(req.query.limit ?? 50), 200);
-    const skip = Math.max(Number(req.query.skip ?? 0), 0);
-
-    // optional JSON sort: {"createdAt":-1}
-    const sort = parseSort(req.query.sort);
-
-    // optional naive text query: q=foo => searches name/title/subject/email (if exists)
-    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-    const filter: Record<string, unknown> = {};
-    if (q) {
-      const or: Record<string, unknown>[] = [
-        { name: { $regex: q, $options: "i" } },
-        { title: { $regex: q, $options: "i" } },
-        { subject: { $regex: q, $options: "i" } },
-        { email: { $regex: q, $options: "i" } },
-        { message: { $regex: q, $options: "i" } },
-        { type: { $regex: q, $options: "i" } },
-      ];
-      filter.$or = or;
-    }
-
-    const col = db.collection(collectionName);
     const [items, total] = await Promise.all([
-      col.find(filter).sort(sort).skip(skip).limit(limit).toArray(),
-      col.countDocuments(filter)
+      CampaignModel.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+      CampaignModel.countDocuments(filter)
     ]);
 
     res.json({ items, page: { total, skip, limit } });
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-// GET /api/marketing/:collection/:id
-marketingRouter.get("/:collection/:id", async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * @openapi
+ * /api/marketing/templates:
+ *   get:
+ *     summary: Listar plantillas
+ *     tags: [Marketing]
+ */
+marketingRouter.get("/templates", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const _id = parseObjectId(req.params.id);
+    const { limit, skip, q, sortBy, order } = QuerySchemaZod.parse(req.query);
+    const filter = getSearchFilter(q);
+    const sort = getSortOptions(sortBy, order);
 
-    const doc = await db.collection(collectionName).findOne({ _id });
+    const [items, total] = await Promise.all([
+      TemplateModel.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+      TemplateModel.countDocuments(filter)
+    ]);
+
+    res.json({ items, page: { total, skip, limit } });
+  } catch (e) { next(e); }
+});
+
+/**
+ * @openapi
+ * /api/marketing/metrics:
+ *   get:
+ *     summary: Listar métricas de campañas
+ *     tags: [Marketing]
+ */
+marketingRouter.get("/metrics", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { limit, skip, sortBy, order } = QuerySchemaZod.parse(req.query);
+    const sort = getSortOptions(sortBy, order);
+
+    const [items, total] = await Promise.all([
+      MetricModel.find().sort(sort).skip(skip).limit(limit).lean(),
+      MetricModel.countDocuments()
+    ]);
+
+    res.json({ items, page: { total, skip, limit } });
+  } catch (e) { next(e); }
+});
+
+
+/**
+ * @openapi
+ * /api/marketing/campaigns/{id}:
+ *   get:
+ *     summary: Obtener una campaña por ID
+ *     tags: [Campaigns]
+ */
+marketingRouter.get("/campaigns/:id", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const doc = await CampaignModel.findById(req.params.id).lean();
     if (!doc) return res.status(404).json({ error: "not_found" });
-
     res.json(doc);
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-// POST /api/marketing/:collection
-marketingRouter.post("/:collection", async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * @openapi
+ * /api/marketing/campaigns:
+ *   post:
+ *     summary: Crear una nueva campaña
+ *     tags: [Campaigns]
+ */
+marketingRouter.post("/campaigns", validate(CampaignSchemaZod), async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    await ensureIndexes(db);
-
-    const rawPayload: unknown = req.body ?? {};
-
-    const payload = (() => {
-      if (collectionName === "segments") return validateSegmentPayload(rawPayload);
-      if (collectionName === "notifications") return validateNotificationPayload(rawPayload);
-      if (!isPlainObject(rawPayload)) {
-        const err = new Error("invalid_body") as Error & { status?: number };
-        err.status = 400;
-        throw err;
-      }
-      return rawPayload;
-    })();
-
-  const now = new Date();
-  const createdAtRaw = (payload as Record<string, unknown>).createdAt;
-  const createdAt = createdAtRaw instanceof Date || typeof createdAtRaw === "string" ? createdAtRaw : now;
-
-  const doc = { ...payload, createdAt, updatedAt: now };
-
-    const result = await db.collection(collectionName).insertOne(doc);
-    const created = await db.collection(collectionName).findOne({ _id: result.insertedId });
-
-    res.status(201).json(created);
-  } catch (e) {
-    next(e);
-  }
+    const doc = await CampaignModel.create(req.body);
+    res.status(201).json(doc);
+  } catch (e) { next(e); }
 });
 
-// PUT /api/marketing/:collection/:id
-marketingRouter.put("/:collection/:id", async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * @openapi
+ * /api/marketing/campaigns/{id}:
+ *   put:
+ *     summary: Actualizar una campaña
+ *     tags: [Campaigns]
+ */
+marketingRouter.put("/campaigns/:id", validate(CampaignSchemaZod.partial()), async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const _id = parseObjectId(req.params.id);
-    await ensureIndexes(db);
-
-    const rawPayload: unknown = req.body ?? {};
-
-    const payload = (() => {
-      if (collectionName === "segments") return validateSegmentPayload(rawPayload);
-      if (collectionName === "notifications") return validateNotificationPayload(rawPayload);
-      if (!isPlainObject(rawPayload)) {
-        const err = new Error("invalid_body") as Error & { status?: number };
-        err.status = 400;
-        throw err;
-      }
-      return rawPayload;
-    })();
-
-    // Avoid changing _id
-    const { _id: _ignored, ...rest } = payload as Record<string, unknown>;
-    // reference to satisfy unused-var linter
-    void _ignored;
-
-  const update: Record<string, unknown> = { ...rest, updatedAt: new Date() };
-
-    const result = await db
-      .collection(collectionName)
-      .findOneAndUpdate({ _id }, { $set: update }, { returnDocument: "after" });
-
-    const updated = result?.value;
-    if (!updated) return res.status(404).json({ error: "not_found" });
-
-    res.json(updated);
-  } catch (e) {
-    next(e);
-  }
+    const doc = await CampaignModel.findByIdAndUpdate(
+      req.params.id,
+      { $set: req.body },
+      { new: true }
+    ).lean();
+    if (!doc) return res.status(404).json({ error: "not_found" });
+    res.json(doc);
+  } catch (e) { next(e); }
 });
 
-// DELETE /api/marketing/:collection/:id
-marketingRouter.delete("/:collection/:id", async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * @openapi
+ * /api/marketing/campaigns/{id}:
+ *   delete:
+ *     summary: Eliminar una campaña
+ *     tags: [Campaigns]
+ */
+marketingRouter.delete("/campaigns/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const collectionName = collectionFromParam(req);
-    const db = getDb(req);
-    const _id = parseObjectId(req.params.id);
-
-    const result = await db.collection(collectionName).deleteOne({ _id });
-    if (result.deletedCount === 0) return res.status(404).json({ error: "not_found" });
-
+    const result = await CampaignModel.findByIdAndDelete(req.params.id);
+    if (!result) return res.status(404).json({ error: "not_found" });
     res.status(204).send();
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-// Error normalization
-marketingRouter.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
-  if (!err) return next();
-  const e = err as { status?: unknown; message?: unknown };
-  const status = Number(e.status ?? 500);
-  const message = status < 500 ? String(e.message ?? "bad_request") : "internal_error";
+
+// --- 2. RUTAS DE PLANTILLAS (TEMPLATES) ---
+
+/**
+ * @openapi
+ * /api/marketing/templates/{id}:
+ *   get:
+ *     summary: Obtener una plantilla por ID
+ *     tags: [Templates]
+ */
+marketingRouter.get("/templates/:id", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const doc = await TemplateModel.findById(req.params.id).lean();
+    if (!doc) return res.status(404).json({ error: "not_found" });
+    res.json(doc);
+  } catch (e) { next(e); }
+});
+
+marketingRouter.post("/templates", validate(TemplateSchemaZod), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const doc = await TemplateModel.create(req.body);
+    res.status(201).json(doc);
+  } catch (e) { next(e); }
+});
+
+marketingRouter.put("/templates/:id", validate(TemplateSchemaZod.partial()), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const doc = await TemplateModel.findByIdAndUpdate(req.params.id, { $set: req.body }, { new: true }).lean();
+    if (!doc) return res.status(404).json({ error: "not_found" });
+    res.json(doc);
+  } catch (e) { next(e); }
+});
+
+marketingRouter.delete("/templates/:id", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await TemplateModel.findByIdAndDelete(req.params.id);
+    if (!result) return res.status(404).json({ error: "not_found" });
+    res.status(204).send();
+  } catch (e) { next(e); }
+});
+
+
+// --- 3. RUTAS DE MÉTRICAS (METRICS) - Solo Lectura ---
+
+/**
+ * @openapi
+ * /api/marketing/metrics/{campaignId}:
+ *   get:
+ *     summary: Obtener métricas de una campaña específica
+ *     tags: [Metrics]
+ */
+marketingRouter.get("/metrics/:campaignId", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const doc = await MetricModel.findOne({ campaignId: req.params.campaignId }).lean();
+    if (!doc) return res.status(404).json({ error: "metrics_not_found" });
+    res.json(doc);
+  } catch (e) { next(e); }
+});
+
+
+// --- 4. MANEJO DE ERRORES CENTRALIZADO (SIN ANY) ---
+
+interface CustomError extends Error {
+  status?: number;
+}
+
+marketingRouter.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  // 1. Errores de Validación de Zod
+  if (err instanceof z.ZodError) {
+    return res.status(400).json({ 
+      error: "validation_error", 
+      details: err.issues.map(i => ({ path: i.path, message: i.message })) 
+    });
+  }
+
+  // 2. Errores de Mongoose (CastError por IDs mal formados, etc)
+  if (err && typeof err === 'object' && 'name' in err && err.name === 'CastError') {
+    return res.status(400).json({ error: "invalid_id_format" });
+  }
+
+  // 3. Errores genéricos controlados
+  const error = err as CustomError;
+  const status = error.status || 500;
+  const message = status < 500 ? error.message : "internal_error";
+
+  // Log de errores 500 para el desarrollador
+  if (status >= 500) {
+    console.error("Critical Error:", error);
+  }
+
   res.status(status).json({ error: message });
 });

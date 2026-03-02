@@ -1,41 +1,70 @@
-import { Router, type Request, type Response, type NextFunction } from "express";
-import { ObjectId } from "mongodb";
+import { Router, type NextFunction, type Request, type Response } from "express";
+import { z } from "zod";
+import { UserModel } from "../admin/collections.js"; // Importamos el modelo de Mongoose
+// import jwt from "jsonwebtoken"; // Necesitarás instalarlo: npm install jsonwebtoken @types/jsonwebtoken
 
 export const authRouter = Router();
 
-function getDb(req: Request) {
-  const mongo = req.app.locals.mongo;
-  if (!mongo) throw new Error("Mongo not initialized");
-  return mongo.db;
-}
+// --- 1. ESQUEMA DE VALIDACIÓN (Zod) ---
+const LoginSchema = z.object({
+  email: z.string().email("Email inválido").toLowerCase().trim(),
+  password: z.string().min(1, "La contraseña es requerida"),
+});
 
-// POST /api/auth/login
+/**
+ * @openapi
+ * /api/auth/login:
+ *   post:
+ *     summary: Iniciar sesión
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email: { type: string }
+ *               password: { type: string }
+ */
 authRouter.post("/login", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { email, password } = req.body;
-    const db = getDb(req);
+    // 2. VALIDACIÓN DE ENTRADA CON ZOD
+    // Sustituimos las validaciones manuales de if(!email)
+    const { email, password } = await LoginSchema.parseAsync(req.body);
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "email_and_password_required" });
-    }
-
-    // Buscamos al usuario
-    const user = await db.collection("users").findOne({ 
-      email: email.toLowerCase().trim() 
-    });
+    // 3. USO DE MONGOOSE (Evitamos acceso dinámico y getDb)
+    // Buscamos usando el modelo estricto. Mongoose maneja la conexión internamente.
+    const user = await UserModel.findOne({ email }).select("+password"); 
+    // .select("+password") es necesario si en el Schema pusiste password: { select: false }
 
     if (!user) {
-      return res.status(401).json({ error: "user_not_found" });
+      return res.status(401).json({ error: "invalid_credentials" });
     }
 
-    // Validación temporal (luego usaremos bcrypt)
+    // 4. VALIDACIÓN DE PASSWORD
+    // Por ahora comparas texto plano, pero aquí iría: await bcrypt.compare(password, user.password)
     if (user.password !== password) {
-      return res.status(401).json({ error: "invalid_password" });
+      return res.status(401).json({ error: "invalid_credentials" });
     }
 
-    // Respondemos con los datos necesarios para el móvil
+    if (!user.active) {
+      return res.status(403).json({ error: "user_inactive" });
+    }
+
+    // 5. PROTECCIÓN DE RUTAS (Generación de Token)
+    // Para proteger las rutas, el login debe devolver algo que identifique al usuario.
+    // Ejemplo básico (deberías usar una librería como jsonwebtoken):
+    const token = "JWT_GENERADO_AQUÍ"; 
+
+    // Actualizamos el último login (Mongoose facilita esto)
+    user.lastLogin = new Date();
+    await user.save();
+
+    // 6. RESPUESTA TIPADA (Sin any)
     res.json({
       message: "login_success",
+      token, // Este token lo usará el móvil en los headers
       user: {
         id: user._id,
         email: user.email,
@@ -45,6 +74,17 @@ authRouter.post("/login", async (req: Request, res: Response, next: NextFunction
       }
     });
   } catch (e) {
-    next(e);
+    next(e); // El manejador de errores de Zod que hicimos en Admin se encargará si falla el parseAsync
   }
+});
+
+// Middleware de Error específico para este router (o puedes usar uno global)
+authRouter.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof z.ZodError) {
+    return res.status(400).json({ 
+      error: "validation_error", 
+      details: err.issues.map(i => ({ path: i.path, message: i.message })) 
+    });
+  }
+  res.status(err.status || 500).json({ error: err.message || "internal_error" });
 });
